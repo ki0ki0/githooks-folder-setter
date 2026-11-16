@@ -142,36 +142,15 @@ public sealed class TargetsTests
     {
         using var fix = new BuildFixture();
 
-        // Pre-restore with the full PATH so NuGet can reach its cache.
-        var restore = fix.Build(verbosity: "quiet");
-        Assert.True(restore.Succeeded, $"Pre-restore failed:\n{restore.Log}");
-
-        // Delete the marker so the target runs on the next build.
-        if (File.Exists(fix.MarkerPath)) fix.DeleteMarker();
-
-        // PATH points only to a temp dir with no git binary plus dotnet.
-        string emptyBinDir = Path.Combine(
-            Path.GetTempPath(), "empty-bin-" + Path.GetRandomFileName());
-        Directory.CreateDirectory(emptyBinDir);
-
-        var (_, dotnetPath) = RunWhich("dotnet");
-        string dotnetDir = Path.GetDirectoryName(dotnetPath.Trim())!;
-
-        string strippedPath = $"{emptyBinDir}{Path.PathSeparator}{dotnetDir}{Path.PathSeparator}/bin";
-
-        BuildResult result;
-        try
-        {
-            // --no-restore: skip restore so NuGet doesn't need network/cache.
-            result = fix.Build(
-                verbosity: "normal",
-                pathOverride: strippedPath,
-                extraArgs: new[] { "--no-restore" });
-        }
-        finally
-        {
-            try { Directory.Delete(emptyBinDir); } catch { }
-        }
+        // Point GitCmd at a nonexistent binary via MSBuild property.
+        // This is simpler and more reliable than stripping PATH, which is
+        // fragile across environments (git location differs on macOS/Linux).
+        var result = fix.Build(
+            verbosity: "normal",
+            properties: new Dictionary<string, string>
+            {
+                ["GitCmd"] = "/nonexistent/git"
+            });
 
         // Build must succeed despite missing git
         Assert.True(result.Succeeded, $"Build should succeed without git:\n{result.Log}");
@@ -208,21 +187,4 @@ public sealed class TargetsTests
         Assert.Null(fix.ReadMarker());
     }
 
-    // ---------------------------------------------------------------- helpers
-
-    private static (int ExitCode, string Output) RunWhich(string name)
-    {
-        using var proc = new System.Diagnostics.Process();
-        proc.StartInfo = new System.Diagnostics.ProcessStartInfo
-        {
-            FileName = "which",
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-        };
-        proc.StartInfo.ArgumentList.Add(name);
-        proc.Start();
-        string output = proc.StandardOutput.ReadToEnd();
-        proc.WaitForExit(5_000);
-        return (proc.ExitCode, output);
-    }
 }
