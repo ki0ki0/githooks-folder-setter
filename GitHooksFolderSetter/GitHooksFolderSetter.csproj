@@ -13,6 +13,8 @@
     <DevelopmentDependency>true</DevelopmentDependency>
 
     <IncludeBuildOutput>false</IncludeBuildOutput>
+    <!-- No lib assembly by design; suppress the spurious NU5128 warning -->
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
