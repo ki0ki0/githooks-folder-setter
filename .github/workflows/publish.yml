@@ -1,0 +1,55 @@
+name: Pack and publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  id-token: write   # required for NuGet trusted publishing (OIDC)
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.x'
+
+      - name: Pack (local feed for tests)
+        run: |
+          dotnet pack GitHooksFolderSetter/GitHooksFolderSetter.csproj \
+            -o /tmp/ghfs-pkg --nologo -v quiet
+
+      - name: Test
+        run: |
+          dotnet test tests/GitHooksFolderSetter.Tests/GitHooksFolderSetter.Tests.csproj \
+            --nologo
+        env:
+          GHFS_PKG_DIR: /tmp/ghfs-pkg
+
+  publish:
+    name: Publish to NuGet
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.x'
+
+      - name: Pack
+        run: |
+          dotnet pack GitHooksFolderSetter/GitHooksFolderSetter.csproj \
+            --nologo -v quiet -o ./nupkg
+
+      - name: Push to NuGet (trusted publisher / OIDC)
+        run: |
+          dotnet nuget push ./nupkg/*.nupkg \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate
