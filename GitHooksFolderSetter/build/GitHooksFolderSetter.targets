@@ -3,38 +3,71 @@
   <PropertyGroup>
     <GitCmd>git</GitCmd>
     <SetMarkerName>git-hook-folder.set</SetMarkerName>
-    <Skip Condition="'$(CI)' != ''">true</Skip>
-    <Skip Condition="'$(CI)' == ''">false</Skip>
+
+    <!-- Skip in CI / container / design-time / opt-out environments -->
+    <GitHooksFolderSetterSkip Condition="'$(GitHooksFolderSetterDisable)' == 'true'">true</GitHooksFolderSetterSkip>
+    <GitHooksFolderSetterSkip Condition="'$(CI)' != ''">true</GitHooksFolderSetterSkip>
+    <GitHooksFolderSetterSkip Condition="'$(TF_BUILD)' != ''">true</GitHooksFolderSetterSkip>
+    <GitHooksFolderSetterSkip Condition="'$(DOTNET_RUNNING_IN_CONTAINER)' != ''">true</GitHooksFolderSetterSkip>
+    <GitHooksFolderSetterSkip Condition="'$(DesignTimeBuild)' == 'true'">true</GitHooksFolderSetterSkip>
+    <GitHooksFolderSetterSkip Condition="'$(GitHooksFolderSetterSkip)' == ''">false</GitHooksFolderSetterSkip>
+
+    <!--
+      Fast path: look for the marker file sitting inside a .git directory
+      somewhere above the project.  GetDirectoryNameOfFileAbove searches for
+      a file named  git\<marker>  which exists only when .git is a real
+      directory (not a worktree/submodule file).
+    -->
+    <_MarkerRoot Condition="!$(GitHooksFolderSetterSkip)">$([MSBuild]::GetDirectoryNameOfFileAbove($(MSBuildProjectDirectory), 'git\$(SetMarkerName)'))</_MarkerRoot>
+    <_MarkerPath Condition="'$(_MarkerRoot)' != ''">$([MSBuild]::NormalizeDirectory('$(_MarkerRoot)', 'git'))$(SetMarkerName)</_MarkerPath>
+    <_MarkerContent Condition="'$(_MarkerPath)' != '' and Exists('$(_MarkerPath)')">$([System.IO.File]::ReadAllText('$(_MarkerPath)').Trim())</_MarkerContent>
+
+    <!--
+      Skip the entire target when the marker already records the current
+      HooksPath.  Property evaluation costs ~1.6 ms; no process is spawned.
+    -->
+    <GitHooksFolderSetterSkip Condition="'$(_MarkerContent)' == '$(HooksPath)'">true</GitHooksFolderSetterSkip>
   </PropertyGroup>
 
-  <Target Name="_GitRoot" Condition="!$(Skip)">
-    <Exec Command='$(GitCmd) rev-parse --show-toplevel' ConsoleToMSBuild='true' ContinueOnError='true'>
+  <!--
+    Single combined target.  Condition is evaluated once; when true the whole
+    target body is skipped and no child targets are scheduled.
+  -->
+  <Target Name="SetHooksFolderTarget"
+          BeforeTargets="BeforeBuild"
+          Condition="!$(GitHooksFolderSetterSkip)">
+
+    <!-- Slow path: locate .git root via git rev-parse -->
+    <Exec Command='$(GitCmd) rev-parse --show-toplevel'
+          ConsoleToMSBuild='true'
+          IgnoreExitCode='true'>
       <Output TaskParameter="ConsoleOutput" PropertyName="_GitOutput" />
-      <Output TaskParameter="ExitCode" PropertyName="MSBuildLastExitCode" />
+      <Output TaskParameter="ExitCode"      PropertyName="_GitExitCode" />
     </Exec>
-    <Error Condition="'$(MSBuildLastExitCode)' != '0'" Text="Detection of '.git' folder location failed. Git is not installed?" />
 
-    <PropertyGroup Condition="'$(MSBuildLastExitCode)' == '0'">
-      <GitRoot>$([MsBuild]::NormalizeDirectory($(_GitOutput.Trim())))</GitRoot>
+    <Warning Condition="'$(_GitExitCode)' != '0'"
+             Text="GitHooksFolderSetter: could not locate .git root (git not found or not a git repo). Hooks path was not set." />
+
+    <PropertyGroup Condition="'$(_GitExitCode)' == '0'">
+      <_GitRoot>$([MsBuild]::NormalizeDirectory($(_GitOutput.Trim())))</_GitRoot>
+      <_SlowMarkerPath>$(_GitRoot).git\$(SetMarkerName)</_SlowMarkerPath>
     </PropertyGroup>
-  </Target>
-  
-  <!-- Create variable for set maker location -->
-  <Target Name="OutputSetMarkerLocation" DependsOnTargets="_GitRoot" BeforeTargets="Compile" Condition="!($(Skip))">
-    <CombinePath BasePath="$(GitRoot).git" Paths="$(SetMarkerName)">
-      <Output TaskParameter="CombinedPaths" PropertyName="SetMarkerLocation" />
-    </CombinePath>
-   </Target>
-
-  <Target Name="SetHooksFoler" AfterTargets="OutputSetMarkerLocation" Condition="!Exists($(SetMarkerLocation)) And !($(Skip))">
 
     <!-- Set custom hooks folder -->
-    <Exec Command="$(GitCmd) config core.hooksPath $(HooksPath)" ConsoleToMsBuild="true">
-      <Output TaskParameter="ExitCode" PropertyName="MSBuildLastExitCode" />
+    <Exec Command='$(GitCmd) config core.hooksPath $(HooksPath)'
+          ConsoleToMSBuild='true'
+          IgnoreExitCode='true'
+          Condition="'$(_GitExitCode)' == '0'">
+      <Output TaskParameter="ExitCode" PropertyName="_GitConfigExitCode" />
     </Exec>
-    <Error Condition="'$(MSBuildLastExitCode)' != '0'" Text="Set custom hooks folder failed" />
 
-    <!-- Create set maker file if not exists -->
-    <WriteLinesToFile File="$(SetMarkerLocation)" Condition="!Exists($(SetMarkerLocation))" />
+    <Warning Condition="'$(_GitExitCode)' == '0' and '$(_GitConfigExitCode)' != '0'"
+             Text="GitHooksFolderSetter: git config core.hooksPath failed." />
+
+    <!-- Write marker with HooksPath as content so the fast path can verify it -->
+    <WriteLinesToFile File='$(_SlowMarkerPath)'
+                      Lines='$(HooksPath)'
+                      Overwrite='true'
+                      Condition="'$(_GitExitCode)' == '0' and '$(_GitConfigExitCode)' == '0'" />
   </Target>
 </Project>
